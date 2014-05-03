@@ -3,26 +3,25 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE RankNTypes             #-}
+{-# LANGUAGE ScopedTypeVariables    #-}
 {-# LANGUAGE TypeOperators          #-}
 
 module CPU.ConvNet where
 
-import           Control.Monad
-import           Data.Array.Repa
-import qualified Data.Vector.Unboxed as V
-import           Prelude             hiding (map, zipWith)
-
+import           Data.Array.Accelerate
+import           Data.Array.Accelerate.Interpreter
+import           Prelude                           as P hiding (map, sum,
+                                                         zipWith)
 -- ** Helper Types
 
-type Vol sh = Array U sh Double
-type DVol sh = Array D sh Double
+type Vol sh = Array sh Double
 
 type Label = Int
 
 -- **  Top Layers
 class TopLayer a where
-    topForward :: (Monad m) => a -> Vol DIM1 -> m (DVol DIM1)
-    topBackward :: (Monad m) => a -> Label -> Vol DIM1 -> Vol DIM1 -> m (DVol DIM1)
+    topForward :: a -> Acc (Vol DIM1) -> Acc (Vol DIM1)
+    topBackward :: a -> Label -> Acc (Vol DIM1) -> Acc (Vol DIM1) -> Acc (Vol DIM1)
 
 -- |SoftMaxLayer
 data SoftMaxLayer = SoftMaxLayer
@@ -31,80 +30,90 @@ instance TopLayer SoftMaxLayer where
     topForward _ = softMaxForward
     topBackward _ = softMaxBackward
 
-softMaxForward :: (Shape sh, Monad m) => Vol sh -> m (DVol sh)
-softMaxForward input = do
-  exponentials <- exponentiate input
-  sumE <- foldAllP (+) 0.0 exponentials
-  return $ map (/ sumE) exponentials
-      where
-        maxA = foldAllP max 0.0
-        exponentiate acts = do
-              maxAct <- maxA acts
-              return $ map (\a -> exp (a - maxAct)) acts
+softMaxForward :: Acc (Vol DIM1) -> Acc (Vol DIM1)
+softMaxForward input =  map division exponentials
+   where
+     division :: Exp Double -> Exp Double
+     division x = x / the sumE
+     exponentials :: Acc (Vol DIM1)
+     exponentials = exponentiate input
 
-softMaxBackward :: (Monad m) => Label -> Vol DIM1 -> Vol DIM1 -> m (DVol DIM1)
-softMaxBackward label output _ = return $ traverse output id gradientAt
+     sumE :: Acc (Scalar Double)
+     sumE = fold (+) 0.0 exponentials
+
+     maxA :: Acc (Scalar Double)
+     maxA = fold max 0.0 exponentials
+
+     exponentiate = map (\a -> exp (a - the maxA))
+
+softMaxBackward :: Label -> Acc (Vol DIM1) -> Acc (Vol DIM1) -> Acc (Vol DIM1)
+softMaxBackward label output _ = zipWith gradient output (enumFromN (shape output) 0)
       where
-        gradientAt f s@(Z :. i) = gradient (f s) i
+        gradient :: Exp Double -> Exp Int -> Exp Double
         gradient outA target = -(bool2Double indicator - outA)
             where
-              indicator = label == target
+              indicator = lift label == target
               bool2Double x = if x then 1.0 else 0.0
 
 -- ** Inner Layers
-class (Shape sh, Shape sh') => InnerLayer a sh sh' | a -> sh where
-    innerForward :: Monad m => a -> Vol sh -> m (DVol sh')
-    innerBackward :: Monad m => a -> Vol sh' -> Vol sh -> m (DVol sh)
+class (Shape sh, Shape sh') => InnerLayer a sh sh' | a -> sh, a -> sh' where
+    innerForward :: a -> Acc (Vol sh) -> Acc (Vol sh')
+    innerBackward :: a -> Acc (Vol sh') -> Acc (Vol sh) -> Acc (Vol sh)
 
 -- |FullyConnectedLayer
 data FullyConnectedLayer sh = FullyConnectedLayer {
-      _weights :: Array U (sh :. Int) Double,
-      _bias    :: Array U DIM1 Double
+      _weights :: [Vol sh],
+      _bias    :: [Double]
     }
 
-instance (Shape sh) => InnerLayer (FullyConnectedLayer sh) sh DIM1 where
+instance (Shape sh, Slice sh) => InnerLayer (FullyConnectedLayer sh) sh DIM1 where
     innerForward = fcForward
     innerBackward = fcBackward
 
-fcForward :: (Shape sh, Monad m)
-          => FullyConnectedLayer sh -> Vol sh -> m (DVol DIM1)
-fcForward (FullyConnectedLayer w b) input =
-    return $ traverse w toNumFilters f
-        where
-          toNumFilters (_ :. i) = Z :. i
-          f _ (Z :. i) = bias + dotProduct weights input
-              where
-                bias = toUnboxed b V.! i
-                weights = computeUnboxedS $ slice w (Any :. (i :: Int))
+fcForward :: Shape sh => FullyConnectedLayer sh -> Acc (Vol sh) -> Acc (Vol DIM1)
+fcForward (FullyConnectedLayer w b) input = use $ fromList (Z :. length b) results
+    where
+      results :: [Exp Double]
+      results = map the (map run filterOps)
+      filterOps :: [Acc (Scalar Double)]
+      filterOps = (map runFilter (P.zip w b)) :: [Acc (Scalar Double)]
+      runFilter :: (Vol sh, Double) -> Acc (Scalar Double)
+      runFilter (weights, bias) = unit $ (lift bias) + dotProduct (use weights) input
 
-fcBackward :: (Monad m)
-           => FullyConnectedLayer sh -> Vol DIM1 -> Vol sh -> m (DVol sh)
+
+-- fwd ::  (Shape sh) => Acc (sh :. Int) -> Acc (Vol DIM1) -> Acc (Vol sh)-> Acc (Vol DIM1)
+-- fwd weights bias input = result
+--     where
+--       (Z :. numFilters) = unlift (shape bias) :: (Z :. Exp Int)
+--       result = generate (lift $ Z :. numFilters) f :: (Acc (Vol DIM1))
+--       f :: Exp DIM1 -> Exp Double
+--       f idx = b + dotProduct w input
+--           where
+--             (Z :. i) = unlift idx :: (Z :. Exp Int)
+--             b = bias ! idx :: Exp Double
+--             w = slice weights (lift $ (sh :. i))
+--       -- arrRepl = replicate (lift $ any :. numFilters) (use w)
+--       -- use $ fromList (index1 10) $ zipWith f w b
+--     -- where
+--     --   f :: Vol sh -> Double -> Exp Double
+--     --   f = undefined
+
+fcBackward :: Shape sh => FullyConnectedLayer sh -> Acc (Vol DIM1) -> Acc (Vol sh) -> Acc (Vol sh)
 fcBackward = undefined
 
-dotProduct :: (Num a, V.Unbox a) => Array U sh a -> Array U sh a -> a
-dotProduct l r = prod (toUnboxed l) (toUnboxed r)
-    where
-      prod lv rv = V.sum $ V.zipWith (*) lv rv
+dotProduct :: (Shape sh) => Acc (Vol sh) -> Acc (Vol sh) -> Exp Double
+dotProduct l r = the $ sum $ zipWith (*) l r
 
 
 -- ** Composing Layers
-type Forward m sh sh' = (Vol sh -> m (DVol sh'))
-
-compose :: (Monad m, Shape sh, Shape sh', Shape sh'')
-        => Forward m sh sh' -> Forward m sh' sh'' -> Forward m sh sh''
-compose f g input = do
-  intermediate <- f input
-  unboxed <- computeP intermediate
-  g unboxed
+type Forward sh sh' = (Acc (Vol sh) -> Acc (Vol sh'))
 
 oneLayerSoftMax
-  :: (Monad m, InnerLayer a sh DIM1, TopLayer a1) =>
-     a -> a1 -> Forward m sh DIM1
-oneLayerSoftMax bottom top = compose (innerForward bottom) (topForward top)
+  :: (InnerLayer a sh DIM1, TopLayer a1) =>
+     a -> a1 -> Acc (Vol sh) -> Acc (Vol DIM1)
+oneLayerSoftMax bottom top = innerForward bottom >-> topForward top
 
 twoLayerSoftMax
-  :: (Monad m, InnerLayer a sh sh', InnerLayer a1 sh' DIM1,
-      TopLayer a2) =>
-     a -> a1 -> a2 -> Forward m sh DIM1
-twoLayerSoftMax bottom middle top = compose (innerForward bottom)
-                                    (oneLayerSoftMax middle top)
+  :: (InnerLayer a sh sh', InnerLayer a1 sh' DIM1, TopLayer a2) =>
+     a -> a1 -> a2 -> Acc (Vol sh) -> Acc (Vol DIM1)
+twoLayerSoftMax bottom middle top = innerForward bottom >-> oneLayerSoftMax middle top
