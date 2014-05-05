@@ -118,5 +118,3 @@ newFC sh numFilters = FullyConnectedLayer {
                         _weights=randomishDoubleArray (sh :. (numFilters :: Int)) 0 1.0 1,
                         _bias=randomishDoubleArray (Z :. (numFilters :: Int)) 0 1.0 1
                       }
-
--- ** Test

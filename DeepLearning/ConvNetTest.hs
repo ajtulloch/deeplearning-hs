@@ -11,7 +11,6 @@ import           Test.Framework
 import           Test.Framework.Providers.QuickCheck2
 import           Test.QuickCheck
 
-
 genOneLayer :: (Shape sh) => sh -> Gen (Int, Vol sh)
 genOneLayer sh = do
   a <- choose (1, 10)
@@ -27,7 +26,6 @@ testFilter (numFilters, input) = and invariants
       invariants = [
        (length . toList) outA == numFilters,
        V.length innerA == numFilters]
-
 
 prop_singleLayer :: Property
 prop_singleLayer = forAll (genOneLayer testShape) testFilter

@@ -22,6 +22,7 @@ source-repository head
 Library
   exposed-modules: DeepLearning.ConvNet, DeepLearning.Util
   default-language:    Haskell2010
+  GHC-Options: -Wall
   build-depends:
         base >=4.6 && <4.7,
         accelerate,
