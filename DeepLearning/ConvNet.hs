@@ -14,18 +14,28 @@ Portability : POSIX
 -}
 module DeepLearning.ConvNet
     (
-     (>->),
-     DVol,
-     Forward,
-     InnerLayer,
-     SoftMaxLayer(..),
-     TopLayer,
+     -- ** Main Types
      Vol,
+     DVol,
+     Label,
+
+     -- ** Layers
+     Layer,
+     InnerLayer,
+     TopLayer,
+     SoftMaxLayer(..),
+     FullyConnectedLayer(..),
+
+     -- ** Composing layers
+     (>->),
+     Forward,
+     withActivations,
+
+     -- ** Network building helpers
      flowNetwork,
      net1,
      net2,
      newFC,
-     withActivations,
     ) where
 
 import           Control.Monad as CM
@@ -35,9 +45,6 @@ import           Data.Array.Repa.Algorithms.Randomish
 import qualified Data.Vector.Unboxed                  as V
 import           Prelude                              as P hiding (map, zipWith)
 
-
--- ** Helper Types
-
 -- |Activation matrix
 type Vol sh = Array U sh Double
 -- |Delayed activation matrix
@@ -46,18 +53,19 @@ type DVol sh = Array D sh Double
 -- |Label for supervised learning
 type Label = Int
 
--- **  Top Layers
--- |'TopLayer' is a top level layer that can initialize a
--- backpropagation pass.
-
+-- |'Layer' reprsents a layer that can pass activations forward.
+-- 'TopLayer' and 'InnerLayer' are derived layers that can be
+-- backpropagated through.
 class (Shape sh, Shape sh') => Layer a sh sh' | a -> sh, a -> sh' where
     forward :: (Monad m) => a -> Vol sh -> m (DVol sh')
 
+-- |'TopLayer' is a top level layer that can initialize a
+-- backpropagation pass.
 class Layer a DIM1 DIM1 => TopLayer a where
     topBackward :: (Monad m) => a -> Label -> Vol DIM1 -> Vol DIM1 -> m (DVol DIM1)
 
 -- |'SoftMaxLayer' computes the softmax activation function.
-data SoftMaxLayer = SoftMaxLayer -- 
+data SoftMaxLayer = SoftMaxLayer --
 
 instance Layer SoftMaxLayer DIM1 DIM1 where
     forward _ = softMaxForward
@@ -85,7 +93,6 @@ softMaxBackward label output _ = return $ traverse output id gradientAt
               indicator = label == target
               bool2Double x = if x then 1.0 else 0.0
 
--- ** Inner Layers
 -- |'InnerLayer' represents an inner layer of a neural network that
 -- can accept backpropagation input from higher layers
 class (Layer a sh sh', Shape sh, Shape sh') => InnerLayer a sh sh' | a -> sh, a -> sh' where
@@ -124,12 +131,10 @@ dotProduct l r = prod (toUnboxed l) (toUnboxed r)
       prod lv rv = V.sum $ V.zipWith (*) lv rv
 
 
--- ** Composing Layers
-
 -- |The 'Forward' function represents a single forward pass through a layer.
 type Forward m sh sh' = (Vol sh -> WriterT [V.Vector Double] m (DVol sh'))
 
--- |'(>->)' composes two forward activation functions
+-- |'>->' composes two forward activation functions
 (>->) :: (Monad m, Shape sh, Shape sh', Shape sh'')
         => Forward m sh sh' -> Forward m sh' sh'' -> Forward m sh sh''
 (f >-> g) input = do
@@ -144,7 +149,6 @@ net1
   :: (Monad m, InnerLayer a sh DIM1, TopLayer a1) =>
      a -> a1 -> Forward m sh DIM1
 net1 bottom top = forward bottom >-> forward top
-
 
 -- |'net1' constructs a two-layer fully connected MLP with
 -- softmax output.
@@ -183,9 +187,11 @@ newFC sh numFilters = FullyConnectedLayer {
 flowNetwork :: (Monad m, Shape sh) => sh -> Int -> Int -> Int -> Forward m sh DIM1
 flowNetwork inputShape numHiddenLayers numHiddenNodes numClasses =
     inputLayer >-> innerLayers >-> preTopLayer >-> topLayer
-    where
-      inputLayer = forward $ newFC inputShape numHiddenNodes
-      innerLayers = flatInner $ P.fmap (P.const $ newFC (Z :. numHiddenNodes) numHiddenNodes) [1..numHiddenLayers]
-      preTopLayer = forward $ newFC (Z :. numHiddenNodes) numClasses
-      topLayer = forward SoftMaxLayer
-      flatInner layers = P.foldl1 (>->) (P.fmap forward layers)
+        where
+          flatInner layers = P.foldl1 (>->) (P.fmap forward layers)
+          innerLayer = newFC (Z :. numHiddenNodes) numHiddenNodes
+          innerLayers = flatInner $ P.fmap (const innerLayer)
+                                           [1..numHiddenLayers]
+          inputLayer = forward $ newFC inputShape numHiddenNodes
+          preTopLayer = forward $ newFC (Z :. numHiddenNodes) numClasses
+          topLayer = forward SoftMaxLayer
