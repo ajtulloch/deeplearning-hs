@@ -20,7 +20,7 @@ source-repository head
   location:  https://github.com/ajtulloch/deeplearning-hs.git
 
 Library
-  exposed-modules: CPU.ConvNet
+  exposed-modules: DeepLearning.ConvNet, DeepLearning.Util
   default-language:    Haskell2010
   build-depends:
         base >=4.6 && <4.7,
@@ -31,7 +31,7 @@ Library
         mtl
 
 Test-suite deeplearning_test
-  Main-Is: CPU/ConvNetTest.hs
+  Main-Is: DeepLearning/ConvNetTest.hs
   Type: exitcode-stdio-1.0
   x-uses-tf: true
   default-language: Haskell2010

@@ -1,13 +1,9 @@
-{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts          #-}
 {-# LANGUAGE FlexibleInstances         #-}
 {-# LANGUAGE FunctionalDependencies    #-}
-{-# LANGUAGE MultiParamTypeClasses     #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
-{-# LANGUAGE RankNTypes                #-}
 {-# LANGUAGE TypeOperators             #-}
 
-module CPU.ConvNet where
+module DeepLearning.ConvNet where
 
 import           Control.Monad
 import           Control.Monad.Writer                 hiding (Any)
@@ -15,7 +11,6 @@ import           Data.Array.Repa
 import           Data.Array.Repa.Algorithms.Randomish
 import qualified Data.Vector.Unboxed                  as V
 import           Prelude                              hiding (map, zipWith)
-
 
 
 -- ** Helper Types

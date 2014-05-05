@@ -1,6 +1,12 @@
+{-# LANGUAGE TypeOperators #-}
 module Main where
 
-import           CPU.ConvNet
+import           Data.Array.Repa
+import           DeepLearning.ConvNet
+import           DeepLearning.Util
 
 main :: IO ()
-main = print "hello world"
+main = do
+  (pvol, acts) <- withActivations (testNet testShape 2) (testInput testShape)
+  print (computeS pvol :: Vol DIM1)
+  print acts
