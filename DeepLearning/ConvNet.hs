@@ -49,15 +49,20 @@ type Label = Int
 -- **  Top Layers
 -- |'TopLayer' is a top level layer that can initialize a
 -- backpropagation pass.
-class TopLayer a where
-    topForward :: (Monad m) => a -> Vol DIM1 -> m (DVol DIM1)
+
+class (Shape sh, Shape sh') => Layer a sh sh' | a -> sh, a -> sh' where
+    forward :: (Monad m) => a -> Vol sh -> m (DVol sh')
+
+class Layer a DIM1 DIM1 => TopLayer a where
     topBackward :: (Monad m) => a -> Label -> Vol DIM1 -> Vol DIM1 -> m (DVol DIM1)
 
 -- |'SoftMaxLayer' computes the softmax activation function.
 data SoftMaxLayer = SoftMaxLayer -- 
 
+instance Layer SoftMaxLayer DIM1 DIM1 where
+    forward _ = softMaxForward
+
 instance TopLayer SoftMaxLayer where
-    topForward _ = softMaxForward
     topBackward _ = softMaxBackward
 
 softMaxForward :: (Shape sh, Monad m) => Vol sh -> m (DVol sh)
@@ -83,8 +88,7 @@ softMaxBackward label output _ = return $ traverse output id gradientAt
 -- ** Inner Layers
 -- |'InnerLayer' represents an inner layer of a neural network that
 -- can accept backpropagation input from higher layers
-class (Shape sh, Shape sh') => InnerLayer a sh sh' | a -> sh, a -> sh' where
-    innerForward :: Monad m => a -> Vol sh -> m (DVol sh')
+class (Layer a sh sh', Shape sh, Shape sh') => InnerLayer a sh sh' | a -> sh, a -> sh' where
     innerBackward :: Monad m => a -> Vol sh' -> Vol sh -> m (DVol sh)
 
 -- |'FullyConnectedLayer' represents a fully-connected input layer
@@ -93,8 +97,10 @@ data FullyConnectedLayer sh = FullyConnectedLayer {
       _bias    :: Vol DIM1
     }
 
+instance (Shape sh) => Layer (FullyConnectedLayer sh) sh DIM1 where
+    forward = fcForward
+
 instance (Shape sh) => InnerLayer (FullyConnectedLayer sh) sh DIM1 where
-    innerForward = fcForward
     innerBackward = fcBackward
 
 fcForward :: (Shape sh, Monad m)
@@ -137,7 +143,7 @@ type Forward m sh sh' = (Vol sh -> WriterT [V.Vector Double] m (DVol sh'))
 net1
   :: (Monad m, InnerLayer a sh DIM1, TopLayer a1) =>
      a -> a1 -> Forward m sh DIM1
-net1 bottom top = innerForward bottom >-> topForward top
+net1 bottom top = forward bottom >-> forward top
 
 
 -- |'net1' constructs a two-layer fully connected MLP with
@@ -146,7 +152,7 @@ net2
   :: (Monad m, InnerLayer a sh sh', InnerLayer a1 sh' DIM1,
       TopLayer a2) =>
      a -> a1 -> a2 -> Forward m sh DIM1
-net2 bottom middle top = innerForward bottom >-> net1 middle top
+net2 bottom middle top = forward bottom >-> net1 middle top
 
 -- |'withActivations' computes the output activation, along with the
 -- intermediate activations
@@ -178,8 +184,8 @@ flowNetwork :: (Monad m, Shape sh) => sh -> Int -> Int -> Int -> Forward m sh DI
 flowNetwork inputShape numHiddenLayers numHiddenNodes numClasses =
     inputLayer >-> innerLayers >-> preTopLayer >-> topLayer
     where
-      inputLayer = innerForward $ newFC inputShape numHiddenNodes
-      innerLayers = flatInner $ P.fmap (\_ -> newFC (Z :. numHiddenNodes) numHiddenNodes) [1..numHiddenLayers]
-      preTopLayer = innerForward $ newFC (Z :. numHiddenNodes) numClasses
-      topLayer = topForward SoftMaxLayer
-      flatInner layers = P.foldl1 (>->) (P.fmap innerForward layers)
+      inputLayer = forward $ newFC inputShape numHiddenNodes
+      innerLayers = flatInner $ P.fmap (P.const $ newFC (Z :. numHiddenNodes) numHiddenNodes) [1..numHiddenLayers]
+      preTopLayer = forward $ newFC (Z :. numHiddenNodes) numClasses
+      topLayer = forward SoftMaxLayer
+      flatInner layers = P.foldl1 (>->) (P.fmap forward layers)

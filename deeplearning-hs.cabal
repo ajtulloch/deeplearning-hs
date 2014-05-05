@@ -3,7 +3,7 @@
 
 
 name:                deeplearning-hs
-version:             0.1.0.0
+version:             0.1.0.1
 description:         Implements type-safe deep neural networks
 synopsis:            Deep Learning in Haskell
 homepage:            https://github.com/ajtulloch/deeplearning-hs
