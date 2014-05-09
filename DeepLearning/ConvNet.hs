@@ -1,6 +1,7 @@
+{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts          #-}
 {-# LANGUAGE FlexibleInstances         #-}
-{-# LANGUAGE FunctionalDependencies    #-}
+{-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE TypeOperators             #-}
 
 {-|
@@ -13,79 +14,77 @@ Stability   : experimental
 Portability : POSIX
 -}
 module DeepLearning.ConvNet
-    (
-     -- ** Main Types
-     Vol,
-     DVol,
-     Label,
+    -- (
+    --  -- ** Main Types
+    --  Vol,
+    --  DVol,
+    --  Label,
+    --  -- ** Layers
+    --  -- Layer,
+    --  -- InnerLayer,
+    --  -- TopLayer,
+    --  -- SoftMaxLayer(..),
+    --  -- FullyConnectedLayer(..),
+    --  -- forward,
+    --  -- ** Composing layers
+    --  -- (>->),
+    --  -- Forward,
+    --  -- withActivations,
 
-     -- ** Layers
-     Layer,
-     InnerLayer,
-     TopLayer,
-     SoftMaxLayer(..),
-     FullyConnectedLayer(..),
+    --  -- ** Network building helpers
+    --  -- flowNetwork,
+    --  -- net1,
+    --  -- net2,
+    --  -- newFC,
+    -- )
+    where
 
-     -- ** Composing layers
-     (>->),
-     Forward,
-     withActivations,
+import           Data.Array.Repa     as R
+import qualified Data.Vector.Unboxed as V
+import           Prelude             hiding (map, zipWith)
+import qualified Prelude             as P
 
-     -- ** Network building helpers
-     flowNetwork,
-     net1,
-     net2,
-     newFC,
-    ) where
 
-import           Control.Monad as CM
-import           Control.Monad.Writer                 hiding (Any)
-import           Data.Array.Repa
-import           Data.Array.Repa.Algorithms.Randomish
-import qualified Data.Vector.Unboxed                  as V
-import           Prelude                              as P hiding (map, zipWith)
-
--- |Activation matrix
-type Vol sh = Array U sh Double
--- |Delayed activation matrix
+data SGD = Vanilla { _learningRate :: Double }
+data Network a = Network { _innerLayers :: [a], _topLayer :: a }
+data Example = Example { _input :: DVol DIM1, _label :: Label }
+data Gradients = Gradients { _layerGrads :: [(Layer, [DVol DIM1])]}
 type DVol sh = Array D sh Double
+data BackProp = BackProp { _paramGrad :: [DVol DIM1], _inputGrad :: DVol DIM1 }
+data InputProp = InputProp { _outputGrad :: DVol DIM1, _inputAct :: DVol DIM1 }
 
 -- |Label for supervised learning
 type Label = Int
 
--- |'Layer' reprsents a layer that can pass activations forward.
--- 'TopLayer' and 'InnerLayer' are derived layers that can be
--- backpropagated through.
-class (Shape sh, Shape sh') => Layer a sh sh' | a -> sh, a -> sh' where
-    forward :: (Monad m) => a -> Vol sh -> m (DVol sh')
-
--- |'TopLayer' is a top level layer that can initialize a
--- backpropagation pass.
-class Layer a DIM1 DIM1 => TopLayer a where
-    topBackward :: (Monad m) => a -> Label -> Vol DIM1 -> Vol DIM1 -> m (DVol DIM1)
+-- |'Layer' reprsents a layer that can pass activations forward and backward
+data Layer = Layer {
+      _forward       :: DVol DIM1 -> DVol DIM1,
+      _topBackward   :: Label -> DVol DIM1 -> BackProp,
+      _innerBackward :: InputProp -> BackProp,
+      _applyGradient :: SGD -> [DVol DIM1] -> Layer
+    }
 
 -- |'SoftMaxLayer' computes the softmax activation function.
-data SoftMaxLayer = SoftMaxLayer --
+softMaxLayer :: Layer
+softMaxLayer = Layer {
+                 _forward = softMaxForward,
+                 _topBackward = softMaxBackward,
+                 _innerBackward = error "Should not be called on SoftMaxLayer",
+                 _applyGradient = \_ _ -> softMaxLayer
+               }
 
-instance Layer SoftMaxLayer DIM1 DIM1 where
-    forward _ = softMaxForward
+softMaxForward :: (Shape sh) => DVol sh -> DVol sh
+softMaxForward input = w where
+    exponentials = exponentiate input
+    sumE = foldAllS (+) 0.0 exponentials
+    w = map (/ sumE) exponentials
+    maxA = foldAllS max 0.0
+    exponentiate acts = map (\a -> exp (a - maxAct)) acts
+        where
+          maxAct = maxA acts
 
-instance TopLayer SoftMaxLayer where
-    topBackward _ = softMaxBackward
-
-softMaxForward :: (Shape sh, Monad m) => Vol sh -> m (DVol sh)
-softMaxForward input = do
-  exponentials <- exponentiate input
-  sumE <- foldAllP (+) 0.0 exponentials
-  return $ map (/ sumE) exponentials
-      where
-        maxA = foldAllP max 0.0
-        exponentiate acts = do
-              maxAct <- maxA acts
-              return $ map (\a -> exp (a - maxAct)) acts
-
-softMaxBackward :: (Monad m) => Label -> Vol DIM1 -> Vol DIM1 -> m (DVol DIM1)
-softMaxBackward label output _ = return $ traverse output id gradientAt
+softMaxBackward :: Label -> DVol DIM1 -> BackProp
+softMaxBackward label output = BackProp undefined (R.traverse output id gradientAt)
       where
         gradientAt f s@(Z :. i) = gradient (f s) i
         gradient outA target = -(bool2Double indicator - outA)
@@ -93,105 +92,92 @@ softMaxBackward label output _ = return $ traverse output id gradientAt
               indicator = label == target
               bool2Double x = if x then 1.0 else 0.0
 
--- |'InnerLayer' represents an inner layer of a neural network that
--- can accept backpropagation input from higher layers
-class (Layer a sh sh', Shape sh, Shape sh') => InnerLayer a sh sh' | a -> sh, a -> sh' where
-    innerBackward :: Monad m => a -> Vol sh' -> Vol sh -> m (DVol sh)
-
 -- |'FullyConnectedLayer' represents a fully-connected input layer
-data FullyConnectedLayer sh = FullyConnectedLayer {
-      _weights :: Vol (sh :. Int),
-      _bias    :: Vol DIM1
+data FullyConnectedState = FullyConnectedState {
+      _bias    :: [Double],
+      _weights :: [DVol DIM1]
     }
 
-instance (Shape sh) => Layer (FullyConnectedLayer sh) sh DIM1 where
-    forward = fcForward
+fcLayer :: FullyConnectedState -> Layer
+fcLayer fcState = Layer {
+                    _forward = fcForward fcState,
+                    _innerBackward = fcBackward fcState,
+                    _topBackward = error "Should not be called",
+                    _applyGradient = fcApplyGradient fcState
+                  }
 
-instance (Shape sh) => InnerLayer (FullyConnectedLayer sh) sh DIM1 where
-    innerBackward = fcBackward
+fcApplyGradient :: FullyConnectedState -> SGD -> [DVol DIM1] -> Layer
+fcApplyGradient fcState sgd (biasG:weightsG) = fcLayer newState
+    where
+      newState = undefined
 
-fcForward :: (Shape sh, Monad m)
-          => FullyConnectedLayer sh -> Vol sh -> m (DVol DIM1)
-fcForward (FullyConnectedLayer w b) input =
-    return $ traverse w toNumFilters f
+fcForward :: FullyConnectedState -> DVol DIM1 -> DVol DIM1
+fcForward FullyConnectedState{..} input = delay $ fromListUnboxed (Z :. numFilters) outputs
         where
-          toNumFilters (_ :. i) = Z :. i
-          f _ (Z :. i) = bias + dotProduct weights input
-              where
-                bias = toUnboxed b V.! i
-                weights = computeUnboxedS $ slice w (Any :. (i :: Int))
+          numFilters = length _bias
+          output :: Double -> DVol DIM1 -> Double
+          output b w = b + dotProduct input w
+          outputs = P.zipWith output _bias _weights
+          dotProduct a b = sumAllS $ zipWith (+) a b
 
-fcBackward :: (Monad m)
-           => FullyConnectedLayer sh -> Vol DIM1 -> Vol sh -> m (DVol sh)
+fcBackward :: FullyConnectedState -> InputProp -> BackProp
 fcBackward = undefined
 
-dotProduct :: (Num a, V.Unbox a) => Array U sh a -> Array U sh a -> a
-dotProduct l r = prod (toUnboxed l) (toUnboxed r)
+applyForward :: Network t -> a -> (a -> t -> a) -> Network (t, a)
+applyForward Network{..} input f = Network newInner newTop
     where
-      prod lv rv = V.sum $ V.zipWith (*) lv rv
+     innerActs = scanl f input _innerLayers
+     newInner = zip _innerLayers innerActs
+     topAct = f (last innerActs) _topLayer
+     newTop = (_topLayer, topAct)
+
+predict :: Network Layer -> DVol DIM1 -> Network (Layer, DVol DIM1)
+predict net input = applyForward net input (flip _forward)
+
+instance Functor Network where
+    fmap f Network{..} = Network (fmap f _innerLayers) (f _topLayer)
+
+applyBackward
+  :: Network (t1, b)
+     -> t
+     -> (t -> (t1, b) -> t2)
+     -> (t2 -> (t1, b) -> t2)
+     -> Network (t1, t2)
+applyBackward Network{..} topInput topF innerF = Network newInner newTop
+    where
+      topBackward = topF topInput _topLayer
+      newTop = (fst _topLayer, topBackward)
+      innerBackward = scanl innerF topBackward (reverse _innerLayers)
+      newInner = zip (P.fmap fst _innerLayers) (reverse innerBackward)
+
+backprop
+  :: Network (Layer, DVol DIM1) -> Label -> Network (Layer, BackProp)
+backprop net label = applyBackward net label topBackward innerBackward
+    where
+      topBackward :: Label -> (Layer, DVol DIM1) -> BackProp
+      topBackward label (layer, output) = _topBackward layer label output
+      innerBackward :: BackProp -> (Layer, DVol DIM1) -> BackProp
+      innerBackward BackProp{..} (layer, inputAct) = _innerBackward layer $ InputProp _inputGrad inputAct
 
 
--- |The 'Forward' function represents a single forward pass through a layer.
-type Forward m sh sh' = (Vol sh -> WriterT [V.Vector Double] m (DVol sh'))
+-- accumulate :: Network Layer -> Example -> Gradients
+-- accumulate net@Network{..} Example{..} = undefined where
+--     activations = predict net _input
+--     initialGradient = _topBackward (_topLayer) _label (last activations)
+--     -- initialInput = undefined
+--     -- backprops = P.scanl runBackprop initialInput (P.zip ((reverse . init) _layers) ((reverse . init ) activations))
+--     -- runBackprop :: (BackProp, DVol DIM1) -> BackProp
+--     -- runBackprop (backprop, activation) layer = _innerBackward layer (InputProp backprop activation)
 
--- |'>->' composes two forward activation functions
-(>->) :: (Monad m, Shape sh, Shape sh', Shape sh'')
-        => Forward m sh sh' -> Forward m sh' sh'' -> Forward m sh sh''
-(f >-> g) input = do
-  intermediate <- f input
-  unboxed <- computeP intermediate
-  tell [toUnboxed unboxed]
-  g unboxed
+-- update :: Network Layer -> SGD -> Gradients -> Network (Layer, DVol DIM1)
+-- update Network{..} sgd Gradients{..} = undefined -- Network $ P.zipWith (\l -> (l, _applyGradient l sgd)) _layers _layer
 
--- |'net1' constructs a single-layer fully connected perceptron with
--- softmax output.
-net1
-  :: (Monad m, InnerLayer a sh DIM1, TopLayer a1) =>
-     a -> a1 -> Forward m sh DIM1
-net1 bottom top = forward bottom >-> forward top
+-- -- predict :: Network Layer -> DVol DIM1 -> [DVol DIM1]
+-- -- predict Network{..} input = P.scanl (flip _forward) input (_innerLayers P.++ [_topLayer])
 
--- |'net1' constructs a two-layer fully connected MLP with
--- softmax output.
-net2
-  :: (Monad m, InnerLayer a sh sh', InnerLayer a1 sh' DIM1,
-      TopLayer a2) =>
-     a -> a1 -> a2 -> Forward m sh DIM1
-net2 bottom middle top = forward bottom >-> net1 middle top
-
--- |'withActivations' computes the output activation, along with the
--- intermediate activations
-withActivations :: Forward m sh sh' -> Vol sh -> m (DVol sh', [V.Vector Double])
-withActivations f input = runWriterT (f input)
-
--- |'newFC' constructs a new fully connected layer
-newFC :: Shape sh => sh -> Int -> FullyConnectedLayer sh
-newFC sh numFilters = FullyConnectedLayer {
-                        _weights=randomishDoubleArray (sh :. (numFilters :: Int)) 0 1.0 1,
-                        _bias=randomishDoubleArray (Z :. (numFilters :: Int)) 0 1.0 1
-                      }
-
--- |'FlowNetwork' builds a network of the form
---
--- @
---  Input Layer              Output Softmax
---     +--+
---     |  |   Inner Layers    +--+   +--+
---     |  |                   |  |   |  |
---     |  |   +-+   +-+  +-+  |  |   |  |
---     |  +---+ +---+ +--+ +--+  +--->  |
---     |  |   +-+   +-+  +-+  |  |   |  |
---     |  |                   |  |   |  |
---     |  |                   +--+   +--+
---     +--+
--- @
-flowNetwork :: (Monad m, Shape sh) => sh -> Int -> Int -> Int -> Forward m sh DIM1
-flowNetwork inputShape numHiddenLayers numHiddenNodes numClasses =
-    inputLayer >-> innerLayers >-> preTopLayer >-> topLayer
-        where
-          flatInner layers = P.foldl1 (>->) (P.fmap forward layers)
-          innerLayer = newFC (Z :. numHiddenNodes) numHiddenNodes
-          innerLayers = flatInner $ P.fmap (const innerLayer)
-                                           [1..numHiddenLayers]
-          inputLayer = forward $ newFC inputShape numHiddenNodes
-          preTopLayer = forward $ newFC (Z :. numHiddenNodes) numClasses
-          topLayer = forward SoftMaxLayer
+-- runBatch :: Network Layer -> SGD -> [Example] -> Network (Layer, DVol DIM1)
+-- runBatch net@Network{..} sgd examples = update net sgd (Gradients mergedGrads) where
+--     gradients = P.fmap (_layerGrads . accumulate net) examples
+--     mergedGrads = P.foldl1 merge gradients
+--     merge :: [(Layer, [DVol DIM1])] -> [[DVol DIM1]] -> [[DVol DIM1]]
+--     merge (layer, grads) = P.zipWith (P.zipWith (+^)) -- FIXME customizable

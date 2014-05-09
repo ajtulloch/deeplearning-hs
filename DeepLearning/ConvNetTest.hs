@@ -11,13 +11,13 @@ import           Test.Framework
 import           Test.Framework.Providers.QuickCheck2
 import           Test.QuickCheck
 
-genOneLayer :: (Shape sh) => sh -> Gen (Int, Vol sh)
+genOneLayer :: DIM1 -> Gen (Int, Vol DIM1)
 genOneLayer sh = do
   a <- choose (1, 10)
   b <- arbitraryUShaped sh
   return (a, b)
 
-testFilter :: (Shape sh) => (Int, Vol sh) -> Bool
+testFilter :: (Int, Vol DIM1) -> Bool
 testFilter (numFilters, input) = and invariants
     where
       [(outAP, [innerA])] = withActivations (testNet sh numFilters) (testInput sh)
@@ -32,7 +32,6 @@ prop_singleLayer = forAll (genOneLayer testShape) testFilter
 
 tests :: [Test]
 tests = [testProperty "singleLayer" prop_singleLayer]
-
 
 main :: IO ()
 main = defaultMainWithOpts tests mempty
