@@ -39,19 +39,29 @@ module DeepLearning.ConvNet
     -- )
     where
 
-import           Data.Array.Repa     as R
-import qualified Data.Vector.Unboxed as V
-import           Prelude             hiding (map, zipWith)
-import qualified Prelude             as P
-
+import           Data.Array.Repa hiding (toList)
+import qualified Data.Array.Repa as R
+import qualified Data.List       as L
+import           Prelude         hiding (map, zipWith)
+import qualified Prelude         as P
 
 data SGD = Vanilla { _learningRate :: Double }
 data Network a = Network { _innerLayers :: [a], _topLayer :: a }
 data Example = Example { _input :: DVol DIM1, _label :: Label }
-data Gradients = Gradients { _layerGrads :: [(Layer, [DVol DIM1])]}
+
 type DVol sh = Array D sh Double
+
+data Activations = Activations {
+      _inputAct  :: DVol DIM1,
+      _outputAct :: DVol DIM1
+    }
+
+data Gradients = Gradients { _layerGrads :: [(Layer, [DVol DIM1])]}
 data BackProp = BackProp { _paramGrad :: [DVol DIM1], _inputGrad :: DVol DIM1 }
-data InputProp = InputProp { _outputGrad :: DVol DIM1, _inputAct :: DVol DIM1 }
+data InputProp = InputProp {
+      _outputGrad  :: DVol DIM1,
+      _activations :: Activations
+    }
 
 -- |Label for supervised learning
 type Label = Int
@@ -59,9 +69,9 @@ type Label = Int
 -- |'Layer' reprsents a layer that can pass activations forward and backward
 data Layer = Layer {
       _forward       :: DVol DIM1 -> DVol DIM1,
-      _topBackward   :: Label -> DVol DIM1 -> BackProp,
+      _topBackward   :: Label -> Activations -> BackProp,
       _innerBackward :: InputProp -> BackProp,
-      _applyGradient :: SGD -> [DVol DIM1] -> Layer
+      _applyGradient :: SGD -> [BackProp] -> Layer
     }
 
 -- |'SoftMaxLayer' computes the softmax activation function.
@@ -83,8 +93,8 @@ softMaxForward input = w where
         where
           maxAct = maxA acts
 
-softMaxBackward :: Label -> DVol DIM1 -> BackProp
-softMaxBackward label output = BackProp undefined (R.traverse output id gradientAt)
+softMaxBackward :: Label -> Activations -> BackProp
+softMaxBackward label Activations{..} = BackProp undefined (R.traverse _outputAct id gradientAt)
       where
         gradientAt f s@(Z :. i) = gradient (f s) i
         gradient outA target = -(bool2Double indicator - outA)
@@ -106,7 +116,7 @@ fcLayer fcState = Layer {
                     _applyGradient = fcApplyGradient fcState
                   }
 
-fcApplyGradient :: FullyConnectedState -> SGD -> [DVol DIM1] -> Layer
+fcApplyGradient :: FullyConnectedState -> SGD -> [BackProp] -> Layer
 fcApplyGradient fcState sgd (biasG:weightsG) = fcLayer newState
     where
       newState = undefined
@@ -126,16 +136,27 @@ fcBackward = undefined
 applyForward :: Network t -> a -> (a -> t -> a) -> Network (t, a)
 applyForward Network{..} input f = Network newInner newTop
     where
-     innerActs = scanl f input _innerLayers
+     innerActs = tail $ scanl f input _innerLayers
      newInner = zip _innerLayers innerActs
      topAct = f (last innerActs) _topLayer
      newTop = (_topLayer, topAct)
 
-predict :: Network Layer -> DVol DIM1 -> Network (Layer, DVol DIM1)
-predict net input = applyForward net input (flip _forward)
+activations
+  :: Network Layer -> Activations -> Network (Layer, Activations)
+activations net input = applyForward net input layerActs where
+    layerActs Activations{..} layer = Activations _outputAct (_forward layer _outputAct)
 
 instance Functor Network where
     fmap f Network{..} = Network (fmap f _innerLayers) (f _topLayer)
+
+-- instance Foldable t => Foldable (Network t) where
+--     foldMap
+
+netToList :: Network a -> [a]
+netToList Network{..} = _innerLayers P.++ [_topLayer]
+
+netFromList :: [a] -> Network a
+netFromList layers = Network (init layers) (last layers)
 
 applyBackward
   :: Network (t1, b)
@@ -150,34 +171,31 @@ applyBackward Network{..} topInput topF innerF = Network newInner newTop
       innerBackward = scanl innerF topBackward (reverse _innerLayers)
       newInner = zip (P.fmap fst _innerLayers) (reverse innerBackward)
 
-backprop
-  :: Network (Layer, DVol DIM1) -> Label -> Network (Layer, BackProp)
+backprop :: Network (Layer, Activations) -> Label -> Network (Layer, BackProp)
 backprop net label = applyBackward net label topBackward innerBackward
     where
-      topBackward :: Label -> (Layer, DVol DIM1) -> BackProp
+      topBackward :: Label -> (Layer, Activations) -> BackProp
       topBackward label (layer, output) = _topBackward layer label output
-      innerBackward :: BackProp -> (Layer, DVol DIM1) -> BackProp
-      innerBackward BackProp{..} (layer, inputAct) = _innerBackward layer $ InputProp _inputGrad inputAct
+      innerBackward :: BackProp -> (Layer, Activations) -> BackProp
+      innerBackward BackProp{..} (layer, acts) = _innerBackward layer $ InputProp _inputGrad acts
 
+exampleGradients
+  :: Network Layer -> (DVol DIM1, Label) -> Network (Layer, BackProp)
+exampleGradients net (input, label) = backprop activated label
+    where
+      -- FIXME - this isn't a great pattern...
+      activated = activations net (Activations undefined input)
 
--- accumulate :: Network Layer -> Example -> Gradients
--- accumulate net@Network{..} Example{..} = undefined where
---     activations = predict net _input
---     initialGradient = _topBackward (_topLayer) _label (last activations)
---     -- initialInput = undefined
---     -- backprops = P.scanl runBackprop initialInput (P.zip ((reverse . init) _layers) ((reverse . init ) activations))
---     -- runBackprop :: (BackProp, DVol DIM1) -> BackProp
---     -- runBackprop (backprop, activation) layer = _innerBackward layer (InputProp backprop activation)
+batchGradients :: Network Layer -> [(DVol DIM1, Label)] -> Network (Layer, [BackProp])
+batchGradients net examples = netFromList (zip (netToList net) mergedGrads)
+    where
+      gradients :: [[(Layer, BackProp)]]
+      gradients = P.fmap (netToList . exampleGradients net) examples
+      layerGrads = L.transpose gradients
+      mergedGrads = P.fmap (P.fmap snd) layerGrads
 
--- update :: Network Layer -> SGD -> Gradients -> Network (Layer, DVol DIM1)
--- update Network{..} sgd Gradients{..} = undefined -- Network $ P.zipWith (\l -> (l, _applyGradient l sgd)) _layers _layer
+applyGradients :: Network (Layer, [BackProp]) -> SGD -> Network Layer
+applyGradients net sgd = P.fmap (\(layer, backprops) -> _applyGradient layer sgd backprops) net
 
--- -- predict :: Network Layer -> DVol DIM1 -> [DVol DIM1]
--- -- predict Network{..} input = P.scanl (flip _forward) input (_innerLayers P.++ [_topLayer])
-
--- runBatch :: Network Layer -> SGD -> [Example] -> Network (Layer, DVol DIM1)
--- runBatch net@Network{..} sgd examples = update net sgd (Gradients mergedGrads) where
---     gradients = P.fmap (_layerGrads . accumulate net) examples
---     mergedGrads = P.foldl1 merge gradients
---     merge :: [(Layer, [DVol DIM1])] -> [[DVol DIM1]] -> [[DVol DIM1]]
---     merge (layer, grads) = P.zipWith (P.zipWith (+^)) -- FIXME customizable
+runBatch :: Network Layer -> SGD -> [(DVol DIM1, Label)] -> Network Layer
+runBatch net sgd examples = (`applyGradients` sgd) $ batchGradients net examples
