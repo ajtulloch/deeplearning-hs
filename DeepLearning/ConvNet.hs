@@ -43,7 +43,7 @@ import           Control.Monad.Writer                 hiding (Any)
 import           Data.Array.Repa
 import           Data.Array.Repa.Algorithms.Randomish
 import qualified Data.Vector.Unboxed                  as V
-import           Prelude                              as P hiding (map, zipWith)
+import           Prelude                              as P hiding (map, zipWith, traverse)
 
 -- |Activation matrix
 type Vol sh = Array U sh Double
